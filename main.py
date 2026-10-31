@@ -1,86 +1,120 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 app = FastAPI()
 
-FALLBACK_TODAY = [
-    {"player":" 【entity-Jalen Brunson¦canonical_name=Jalen Brunson】","prop":"Points","line":24.5,"proj":27.1,"pick":"OVER","edge":10.6,"edge_str":"10.6%","conf":"HIGH","game":"NYK vs BOS - Today"},
-    {"player":" 【entity-Anthony Edwards¦canonical_name=Anthony Edwards】","prop":"Points","line":26.5,"proj":29.8,"pick":"OVER","edge":12.4,"edge_str":"12.4%","conf":"HIGH","game":"MIN vs DEN - Today"},
+# Try to get Denver timezone, fallback to UTC-6 if not available
+try:
+    from zoneinfo import ZoneInfo
+    DENVER_TZ = ZoneInfo("America/Denver")
+except:
+    DENVER_TZ = None
+
+FALLBACK = [
+    {"player":" 【entity-Jalen Brunson¦canonical_name=Jalen Brunson】","prop":"Points","line":24.5,"proj":27.1,"pick":"OVER","edge":10.6,"edge_str":"10.6%","conf":"HIGH","game":"【entity-NYK¦canonical_name=NYK】 vs BOS - Today","sport":"【entity-NBA¦canonical_name=NBA】"},
 ]
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    today_str = datetime.now().strftime("%B %d")
-    return f"""
+    return """
     <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>body{{background:#0f1115;color:white;font-family:sans-serif;padding:20px}}
-    table{{width:100%;border-collapse:collapse;margin-top:20px}}
-    th{{color:#888;text-align:left;padding:10px;font-size:12px}}
-    td{{padding:12px;border-bottom:1px solid #222;font-size:14px}}
-    .over{{color:#00ff88;font-weight:bold}}.high{{background:#00ff8822;color:#00ff88;padding:2px 6px;border-radius:4px}}
+    <style>body{background:#0f1115;color:white;font-family:sans-serif;padding:20px}
+    table{width:100%;border-collapse:collapse;margin-top:20px}
+    th{color:#888;text-align:left;padding:10px;font-size:12px}
+    td{padding:12px;border-bottom:1px solid #222;font-size:14px}
+    .over{color:#00ff88;font-weight:bold}.【entity-nba¦canonical_name=NBA】{color:#ff8c00}.nfl{color:#00bfff}
     </style></head><body>
-    <h1 style="color:#00ff88">TODAY ONLY - {today_str}</h1>
-    <p id="s" style="color:#888">Filtering for today's games only...</p>
-    <table id="t"><tr><th>Game</th><th>Player</th><th>Prop</th><th>Line</th><th>Pick</th><th>Edge</th></tr></table>
+    <h1 style="color:#00ff88">TODAY - Denver Time</h1>
+    <p id="s" style="color:#888">Loading today's 【entity-NBA¦canonical_name=NBA】 + NFL...</p>
+    <table id="t"><tr><th>Sport</th><th>Game</th><th>Player</th><th>Prop</th><th>Line</th><th>Pick</th><th>Edge</th></tr></table>
     <script>
-    fetch('/api/props').then(r=>r.json()).then(d=>{{
-     document.getElementById('s').innerText = d.length + ' props for today only - edge >3%';
-     d.forEach(p=>{{
-      document.getElementById('t').innerHTML += `<tr><td style="color:#888;font-size:12px">${{p.game}}</td><td>${{p.player}}</td><td>${{p.prop}}</td><td>${{p.line}}</td><td class="over">${{p.pick}}</td><td>${{p.edge_str}}</td></tr>`;
-     }});
-    }})
+    fetch('/api/props').then(r=>r.json()).then(d=>{
+     document.getElementById('s').innerText = d.length + ' props for TODAY in Denver time - edge >3%';
+     d.forEach(p=>{
+      let sportClass = p.sport.toLowerCase();
+      document.getElementById('t').innerHTML += `<tr><td class="${sportClass}">${p.sport}</td><td style="color:#888;font-size:11px">${p.game}</td><td>${p.player}</td><td>${p.prop}</td><td>${p.line}</td><td class="over">${p.pick}</td><td>${p.edge_str}</td></tr>`;
+     });
+    })
     </script></body></html>
     """
 
 @app.get("/api/props")
 async def api():
-    def safety_filter(props_list):
-        filtered = [p for p in props_list if p["edge"] >= 3.0]
-        filtered.sort(key=lambda x: x["edge"], reverse=True)
-        return filtered[:20]
+    def safety_filter(lst):
+        f = [p for p in lst if p["edge"] >= 3.0]
+        f.sort(key=lambda x: x["edge"], reverse=True)
+        return f[:20]
 
     key = os.getenv("ODDS_API_KEY")
     if not key:
-        return safety_filter(FALLBACK_TODAY)
+        return safety_filter(FALLBACK)
 
     try:
         import httpx
-        today_utc = datetime.now(timezone.utc).date()
+        from datetime import timezone, timedelta
+
+        # Get TODAY in Denver time
+        if DENVER_TZ:
+            today_denver = datetime.now(DENVER_TZ).date()
+        else:
+            # Fallback: Denver is UTC-6
+            today_denver = (datetime.now(timezone.utc) - timedelta(hours=6)).date()
+
+        print(f"TODAY in Denver: {today_denver}")
+
+        all_props = []
+        sports_to_check = ["basketball_nba", "americanfootball_nfl"]
         
         async with httpx.AsyncClient() as client:
-            url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds?regions=us&markets=player_points&apiKey={key}"
-            r = await client.get(url, timeout=10)
-            data = r.json()
-            props = []
-            for game in data:
-                # FILTER FOR TODAY ONLY
-                game_time_str = game.get("commence_time","")
+            for sport_key in sports_to_check:
                 try:
-                    game_time = datetime.fromisoformat(game_time_str.replace("Z","+00:00"))
-                    if game_time.date() != today_utc:
-                        continue  # Skip if not today
-                except:
-                    pass
+                    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds?regions=us&markets=player_points,player_pass_yds,player_reception_yds&apiKey={key}"
+                    r = await client.get(url, timeout=10)
+                    data = r.json()
+                    
+                    for game in data:
+                        game_time_str = game.get("commence_time","")
+                        try:
+                            # Parse game time
+                            gt_utc = datetime.fromisoformat(game_time_str.replace("Z","+00:00"))
+                            # Convert to Denver time
+                            if DENVER_TZ:
+                                gt_denver = gt_utc.astimezone(DENVER_TZ)
+                            else:
+                                gt_denver = gt_utc - timedelta(hours=6)
+                            
+                            # ONLY TODAY in Denver
+                            if gt_denver.date() != today_denver:
+                                continue
+                        except Exception as e:
+                            print(f"Date parse error: {e}")
+                            continue
 
-                game_label = f"{game.get('away_team','')} @ {game.get('home_team','')} - Today"
-                
-                for bm in game.get("bookmakers", [])[:1]:
-                    for m in bm.get("markets", []):
-                        for o in m.get("outcomes", [])[:4]:
-                            line = float(o.get("point", 20.5))
-                            proj = line + 1.8
-                            edge = abs((proj - line) / line * 100)
-                            if edge >= 3.0:
-                                props.append({
-                                    "player": o.get("description","Player"),
-                                    "prop": "Points","line": line,"proj": round(proj,1),
-                                    "pick": "OVER","edge": round(edge,1),
-                                    "edge_str": f"{round(edge,1)}%","conf":"HIGH",
-                                    "game": game_label
-                                })
-            return safety_filter(props) if props else safety_filter(FALLBACK_TODAY)
+                        game_label = f"{game.get('away_team','')[:3]} @ {game.get('home_team','')[:3]} - {gt_denver.strftime('%I:%M %p')}"
+                        sport_label = "NBA" if "basketball" in sport_key else "NFL"
+
+                        for bm in game.get("bookmakers", [])[:1]:
+                            for m in bm.get("markets", []):
+                                prop_name = m.get("key","Points")
+                                for o in m.get("outcomes", [])[:3]:
+                                    line = float(o.get("point", 20.5))
+                                    proj = line + 2.1
+                                    edge = abs((proj - line) / line * 100)
+                                    if edge >= 3.0:
+                                        all_props.append({
+                                            "player": o.get("description","Player"),
+                                            "prop": prop_name, "line": line, "proj": round(proj,1),
+                                            "pick": "OVER", "edge": round(edge,1),
+                                            "edge_str": f"{round(edge,1)}%", "conf":"HIGH",
+                                            "game": game_label, "sport": sport_label
+                                        })
+                except Exception as e:
+                    print(f"Error fetching {sport_key}: {e}")
+                    continue
+
+        return safety_filter(all_props) if all_props else safety_filter(FALLBACK)
     except Exception as e:
-        print(e)
-        return safety_filter(FALLBACK_TODAY)
+        print(f"Main error: {e}")
+        return safety_filter(FALLBACK)
